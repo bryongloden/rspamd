@@ -167,7 +167,8 @@ static gboolean rspamd_symbols_cache_check_symbol (struct rspamd_task *task,
 static gboolean rspamd_symbols_cache_check_deps (struct rspamd_task *task,
 		struct symbols_cache *cache,
 		struct cache_item *item,
-		struct cache_savepoint *checkpoint);
+		struct cache_savepoint *checkpoint,
+		guint recursion);
 static void rspamd_symbols_cache_enable_symbol (struct rspamd_task *task,
 		struct symbols_cache *cache, const gchar *symbol);
 static void rspamd_symbols_cache_disable_all_symbols (struct rspamd_task *task,
@@ -206,6 +207,46 @@ rspamd_symbols_cache_order_new (gsize nelts)
 	REF_INIT_RETAIN (ord, rspamd_symbols_cache_order_dtor);
 
 	return ord;
+}
+
+static gint
+postfilters_cmp (const void *p1, const void *p2, gpointer ud)
+{
+	const struct cache_item *i1 = *(struct cache_item **)p1,
+			*i2 = *(struct cache_item **)p2;
+	double w1, w2;
+
+	w1 = i1->priority;
+	w2 = i2->priority;
+
+	if (w1 > w2) {
+		return 1;
+	}
+	else if (w1 < w2) {
+		return -1;
+	}
+
+	return 0;
+}
+
+static gint
+prefilters_cmp (const void *p1, const void *p2, gpointer ud)
+{
+	const struct cache_item *i1 = *(struct cache_item **)p1,
+			*i2 = *(struct cache_item **)p2;
+	double w1, w2;
+
+	w1 = i1->priority;
+	w2 = i2->priority;
+
+	if (w1 < w2) {
+		return 1;
+	}
+	else if (w1 > w2) {
+		return -1;
+	}
+
+	return 0;
 }
 
 static gint
@@ -403,8 +444,8 @@ rspamd_symbols_cache_post_init (struct symbols_cache *cache)
 		}
 	}
 
-	g_ptr_array_sort_with_data (cache->prefilters, cache_logic_cmp, cache);
-	g_ptr_array_sort_with_data (cache->postfilters, cache_logic_cmp, cache);
+	g_ptr_array_sort_with_data (cache->prefilters, prefilters_cmp, cache);
+	g_ptr_array_sort_with_data (cache->postfilters, postfilters_cmp, cache);
 }
 
 static gboolean
@@ -1097,7 +1138,7 @@ rspamd_symbols_cache_watcher_cb (gpointer sessiond, gpointer ud)
 
 			if (!isset (checkpoint->processed_bits, it->id * 2)) {
 				if (!rspamd_symbols_cache_check_deps (task, cache, it,
-						checkpoint)) {
+						checkpoint, 0)) {
 					remain ++;
 					break;
 				}
@@ -1215,12 +1256,21 @@ static gboolean
 rspamd_symbols_cache_check_deps (struct rspamd_task *task,
 		struct symbols_cache *cache,
 		struct cache_item *item,
-		struct cache_savepoint *checkpoint)
+		struct cache_savepoint *checkpoint,
+		guint recursion)
 {
 	struct cache_dependency *dep;
 	guint i;
 	gboolean ret = TRUE;
 	gdouble pr = rspamd_random_double_fast ();
+	static const guint max_recursion = 20;
+
+	if (recursion > max_recursion) {
+		msg_err_task ("cyclic dependencies: maximum check level %ud exceed when "
+				"checking dependencies for %s", max_recursion, item->symbol);
+
+		return TRUE;
+	}
 
 	if (item->deps != NULL && item->deps->len > 0) {
 		for (i = 0; i < item->deps->len; i ++) {
@@ -1228,15 +1278,8 @@ rspamd_symbols_cache_check_deps (struct rspamd_task *task,
 
 			if (dep->item == NULL) {
 				/* Assume invalid deps as done */
-				continue;
-			}
-
-			if (dep->id >= (gint)checkpoint->version) {
-				/*
-				 * This is dependency on some symbol that is currently
-				 * not in this checkpoint. So we just pretend that the
-				 * corresponding symbold does not exist
-				 */
+				msg_debug_task ("symbol %s has invalid dependencies from %s",
+						item->symbol, dep->sym);
 				continue;
 			}
 
@@ -1245,7 +1288,8 @@ rspamd_symbols_cache_check_deps (struct rspamd_task *task,
 					/* Not started */
 					if (!rspamd_symbols_cache_check_deps (task, cache,
 							dep->item,
-							checkpoint)) {
+							checkpoint,
+							recursion + 1)) {
 						g_ptr_array_add (checkpoint->waitq, item);
 						ret = FALSE;
 						msg_debug_task ("delayed dependency %d for symbol %d",
@@ -1518,7 +1562,7 @@ rspamd_symbols_cache_process_symbols (struct rspamd_task * task,
 
 			if (!isset (checkpoint->processed_bits, item->id * 2)) {
 				if (!rspamd_symbols_cache_check_deps (task, cache, item,
-						checkpoint)) {
+						checkpoint, 0)) {
 					msg_debug_task ("blocked execution of %d unless deps are "
 									"resolved",
 							item->id);
@@ -1566,13 +1610,9 @@ rspamd_symbols_cache_process_symbols (struct rspamd_task * task,
 		for (i = 0; i < (gint)checkpoint->waitq->len; i ++) {
 			item = g_ptr_array_index (checkpoint->waitq, i);
 
-			if (item->id >= (gint)checkpoint->version) {
-				continue;
-			}
-
 			if (!isset (checkpoint->processed_bits, item->id * 2)) {
 				if (!rspamd_symbols_cache_check_deps (task, cache, item,
-						checkpoint)) {
+						checkpoint, 0)) {
 					break;
 				}
 

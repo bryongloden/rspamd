@@ -1061,6 +1061,17 @@ mime_foreach_callback (GMimeObject * part, gpointer user_data)
 	GMimeStream *part_stream;
 	GByteArray *part_content;
 	gchar *hdrs;
+	/* Blake2b applied to string 'rspamd' */
+	static const guchar hash_key[] = {
+			0xef,0x43,0xae,0x80,0xcc,0x8d,0xc3,0x4c,
+			0x6f,0x1b,0xd6,0x18,0x1b,0xae,0x87,0x74,
+			0x0c,0xca,0xf7,0x8e,0x5f,0x2e,0x54,0x32,
+			0xf6,0x79,0xb9,0x27,0x26,0x96,0x20,0x92,
+			0x70,0x07,0x85,0xeb,0x83,0xf7,0x89,0xe0,
+			0xd7,0x32,0x2a,0xd2,0x1a,0x64,0x41,0xef,
+			0x49,0xff,0xc3,0x8c,0x54,0xf9,0x67,0x74,
+			0x30,0x1e,0x70,0x2e,0xb7,0x12,0x09,0xfe,
+	};
 
 	task = md->task;
 	/* 'part' points to the current part node that g_mime_message_foreach_part() is iterating over */
@@ -1139,6 +1150,11 @@ mime_foreach_callback (GMimeObject * part, gpointer user_data)
 		mime_part->mime = part;
 		mime_part->boundary = g_mime_multipart_get_boundary (GMIME_MULTIPART (part));
 
+		if (mime_part->boundary) {
+			rspamd_cryptobox_hash (mime_part->digest, mime_part->boundary,
+					strlen (mime_part->boundary), hash_key, sizeof (hash_key));
+		}
+
 		debug_task ("found part with content-type: %s/%s",
 				type->type,
 				type->subtype);
@@ -1202,6 +1218,12 @@ mime_foreach_callback (GMimeObject * part, gpointer user_data)
 				mime_part->filename = g_mime_part_get_filename (GMIME_PART (
 							part));
 				mime_part->mime = part;
+
+				if (mime_part->content->len > 0) {
+					rspamd_cryptobox_hash (mime_part->digest,
+							mime_part->content->data, mime_part->content->len,
+							hash_key, sizeof (hash_key));
+				}
 
 				debug_task ("found part with content-type: %s/%s",
 					type->type,
@@ -1271,9 +1293,7 @@ rspamd_message_from_data (struct rspamd_task *task, GByteArray *data,
 		}
 	}
 
-	srch.begin = "Content-Type";
-	srch.len = sizeof ("Content-Type") - 1;
-	tok = g_hash_table_lookup (task->request_headers, &srch);
+	tok = rspamd_task_get_request_header (task, "Content-Type");
 
 	if (tok) {
 		/* We have Content-Type defined */
@@ -1355,6 +1375,8 @@ rspamd_message_parse (struct rspamd_task *task)
 	gint i;
 	gdouble diff, *pdiff;
 	guint tw, *ptw, dw;
+	rspamd_cryptobox_hash_state_t st;
+	guchar digest_out[rspamd_cryptobox_HASHBYTES];
 
 	if (RSPAMD_TASK_IS_EMPTY (task)) {
 		/* Don't do anything with empty task */
@@ -1379,7 +1401,8 @@ rspamd_message_parse (struct rspamd_task *task)
 	 * So we check if a task has non-http format then we check for such a line
 	 * at the beginning to avoid errors
 	 */
-	if (!(task->flags & RSPAMD_TASK_FLAG_JSON)) {
+	if (!(task->flags & RSPAMD_TASK_FLAG_JSON) || (task->flags &
+			RSPAMD_TASK_FLAG_LOCAL_CLIENT)) {
 		if (len > sizeof ("From ") - 1) {
 			if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
 				/* Skip to CRLF */
@@ -1410,6 +1433,7 @@ rspamd_message_parse (struct rspamd_task *task)
 	 * pool allocator
 	 */
 	g_mime_stream_mem_set_owner (GMIME_STREAM_MEM (stream), FALSE);
+	rspamd_cryptobox_hash_init (&st, NULL, 0);
 
 	if (task->flags & RSPAMD_TASK_FLAG_MIME) {
 
@@ -1692,19 +1716,28 @@ rspamd_message_parse (struct rspamd_task *task)
 					"message contains two parts but they are in different multi-parts");
 		}
 	}
-	else {
-		debug_task (
-				"message has too many text parts, so do not try to compare "
-				"them with each other");
+
+	for (i = 0; i < task->parts->len; i ++) {
+		struct rspamd_mime_part *part;
+
+		part = g_ptr_array_index (task->parts, i);
+		rspamd_cryptobox_hash_update (&st, part->digest, sizeof (part->digest));
 	}
 
+	rspamd_cryptobox_hash_final (&st, digest_out);
+	memcpy (task->digest, digest_out, sizeof (task->digest));
+
 	if (task->queue_id) {
-		msg_info_task ("loaded message; id: <%s>; queue-id: <%s>; size: %z",
-				task->message_id, task->queue_id, task->msg.len);
+		msg_info_task ("loaded message; id: <%s>; queue-id: <%s>; size: %z; "
+				"checksum: <%*xs>",
+				task->message_id, task->queue_id, task->msg.len,
+				(gint)sizeof (task->digest), task->digest);
 	}
 	else {
-		msg_info_task ("loaded message; id: <%s>; size: %z",
-				task->message_id, task->msg.len);
+		msg_info_task ("loaded message; id: <%s>; size: %z; "
+				"checksum: <%*xs>",
+				task->message_id, task->msg.len,
+				(gint)sizeof (task->digest), task->digest);
 	}
 
 	return TRUE;

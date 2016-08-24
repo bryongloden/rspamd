@@ -76,6 +76,12 @@ LUA_FUNCTION_DEF (textpart, get_length);
  */
 LUA_FUNCTION_DEF (textpart, get_raw_length);
 /***
+ * @method mime_part:get_urls_length()
+ * Get length of the urls within the part
+ * @return {integer} length of urls in **bytes**
+ */
+LUA_FUNCTION_DEF (textpart, get_urls_length);
+/***
  * @method mime_part:get_lines_count()
  * Get lines number in the part
  * @return {integer} number of lines in the part
@@ -125,6 +131,7 @@ static const struct luaL_reg textpartlib_m[] = {
 	LUA_INTERFACE_DEF (textpart, get_content_oneline),
 	LUA_INTERFACE_DEF (textpart, get_length),
 	LUA_INTERFACE_DEF (textpart, get_raw_length),
+	LUA_INTERFACE_DEF (textpart, get_urls_length),
 	LUA_INTERFACE_DEF (textpart, get_lines_count),
 	LUA_INTERFACE_DEF (textpart, get_words_count),
 	LUA_INTERFACE_DEF (textpart, is_empty),
@@ -275,6 +282,13 @@ LUA_FUNCTION_DEF (mimepart, is_text);
  */
 LUA_FUNCTION_DEF (mimepart, get_text);
 
+/***
+ * @method mime_part:get_digest()
+ * Returns the unique digest for this mime part
+ * @return {string} 128 characters hex string with digest of the part
+ */
+LUA_FUNCTION_DEF (mimepart, get_digest);
+
 static const struct luaL_reg mimepartlib_m[] = {
 	LUA_INTERFACE_DEF (mimepart, get_content),
 	LUA_INTERFACE_DEF (mimepart, get_length),
@@ -289,6 +303,7 @@ static const struct luaL_reg mimepartlib_m[] = {
 	LUA_INTERFACE_DEF (mimepart, get_archive),
 	LUA_INTERFACE_DEF (mimepart, is_text),
 	LUA_INTERFACE_DEF (mimepart, get_text),
+	LUA_INTERFACE_DEF (mimepart, get_digest),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
@@ -423,6 +438,32 @@ lua_textpart_get_raw_length (lua_State * L)
 	else {
 		lua_pushnumber (L, part->orig->len);
 	}
+
+	return 1;
+}
+
+static gint
+lua_textpart_get_urls_length (lua_State * L)
+{
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+	GList *cur;
+	guint total = 0;
+	struct rspamd_process_exception *ex;
+
+	if (part == NULL) {
+		lua_pushnil (L);
+		return 1;
+	}
+
+	for (cur = part->exceptions; cur != NULL; cur = g_list_next (cur)) {
+		ex = cur->data;
+
+		if (ex->type == RSPAMD_EXCEPTION_URL) {
+			total += ex->len;
+		}
+	}
+
+	lua_pushnumber (L, total);
 
 	return 1;
 }
@@ -765,6 +806,24 @@ lua_mimepart_get_text (lua_State * L)
 		*ppart = part->specific_data;
 		rspamd_lua_setclass (L, "rspamd{textpart}", -1);
 	}
+
+	return 1;
+}
+
+static gint
+lua_mimepart_get_digest (lua_State * L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+	gchar digestbuf[rspamd_cryptobox_HASHBYTES * 2 + 1];
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	memset (digestbuf, 0, sizeof (digestbuf));
+	rspamd_encode_hex_buf (part->digest, sizeof (part->digest),
+			digestbuf, sizeof (digestbuf));
+	lua_pushstring (L, digestbuf);
 
 	return 1;
 }

@@ -1147,12 +1147,13 @@ rspamd_tld_trie_callback (struct rspamd_multipattern *mp,
 		p--;
 	}
 
-	if (ndots == 0 || p == start - 1) {
+	if ((ndots == 0 || p == start - 1) &&
+			url->tldlen < url->host + url->hostlen - pos) {
 		url->tld = (gchar *) pos;
 		url->tldlen = url->host + url->hostlen - pos;
 	}
 
-	return 1;
+	return 0;
 }
 
 static gboolean
@@ -1576,9 +1577,11 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 	}
 
 	/* Find TLD part */
-	if (rspamd_multipattern_lookup (url_scanner->search_trie,
-			uri->host, uri->hostlen,
-			rspamd_tld_trie_callback, uri, NULL) == 0) {
+	rspamd_multipattern_lookup (url_scanner->search_trie,
+				uri->host, uri->hostlen,
+				rspamd_tld_trie_callback, uri, NULL);
+
+	if (uri->tldlen == 0) {
 		/* Ignore URL's without TLD if it is not a numeric URL */
 		if (!rspamd_url_is_ip (uri, pool)) {
 			return URI_ERRNO_TLD_MISSING;
@@ -1645,11 +1648,13 @@ rspamd_tld_trie_find_callback (struct rspamd_multipattern *mp,
 	}
 
 	if (ndots == 0 || p == start - 1) {
-		cbdata->out->begin = pos;
-		cbdata->out->len = cbdata->begin + cbdata->len - pos;
+		if (cbdata->begin + cbdata->len - pos > cbdata->out->len) {
+			cbdata->out->begin = pos;
+			cbdata->out->len = cbdata->begin + cbdata->len - pos;
+		}
 	}
 
-	return 1;
+	return 0;
 }
 
 gboolean
@@ -1664,13 +1669,16 @@ rspamd_url_find_tld (const gchar *in, gsize inlen, rspamd_ftok_t *out)
 	cbdata.begin = in;
 	cbdata.len = inlen;
 	cbdata.out = out;
+	out->len = 0;
 
-	if (rspamd_multipattern_lookup (url_scanner->search_trie, in, inlen,
-			rspamd_tld_trie_find_callback, &cbdata, NULL) == 0) {
-		return FALSE;
+	rspamd_multipattern_lookup (url_scanner->search_trie, in, inlen,
+			rspamd_tld_trie_find_callback, &cbdata, NULL);
+
+	if (out->len > 0) {
+		return TRUE;
 	}
 
-	return TRUE;
+	return FALSE;
 }
 
 static const gchar url_braces[] = {

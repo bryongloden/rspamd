@@ -25,12 +25,6 @@ local reconf = config['regexp']
 -- Uncategorized rules
 local subject_re = rspamd_regexp.create('/^(?:(?:Re|Fwd|Fw|Aw|Antwort|Sv):\\s*)+(.+)$/i')
 
--- Local rules
-local r_bgcolor = '/BGCOLOR=/iP'
-local r_font_color = '/font color=[\\"\']?\\#FFFFFF[\\"\']?/iP'
-reconf['R_WHITE_ON_WHITE'] = string.format('(!(%s) & (%s))', r_bgcolor, r_font_color)
-reconf['R_FLASH_REDIR_IMGSHACK'] = '/^(?:http:\\/\\/)?img\\d{1,5}\\.imageshack\\.us\\/\\S+\\.swf/U'
-
 -- Local functions
 
 
@@ -312,7 +306,7 @@ rspamd_config.ENVFROM_PRVS = {
         end
         return false
     end,
-    score = 0.01,
+    score = 0.0,
     description = "Envelope From is a PRVS address that matches the From address",
     group = 'prvs'
 }
@@ -340,7 +334,7 @@ rspamd_config.ENVFROM_VERP = {
         end
         return false
     end,
-    score = 0.01,
+    score = 0.0,
     description = "Envelope From is a VERP address",
     group = "mailing_list"
 }
@@ -364,7 +358,7 @@ rspamd_config.RCVD_TLS_ALL = {
             return true
         end
     end,
-    score = 0.01,
+    score = 0.0,
     description = "All hops used encrypted transports",
     group = "encryption"
 }

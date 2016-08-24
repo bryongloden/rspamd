@@ -433,6 +433,7 @@ add_options (GQueue *opts)
 	GString *numbuf;
 	gchar **hdr, **rcpt;
 
+	ADD_CLIENT_HEADER (opts, "User-Agent", "rspamc");
 	if (ip != NULL) {
 		ADD_CLIENT_HEADER (opts, "Ip", ip);
 	}
@@ -642,7 +643,8 @@ rspamc_symbols_output (FILE *out, ucl_object_t *obj)
 			rspamd_fprintf (out, "DKIM-Signature: %s\n", ucl_object_tostring (
 					cur));
 		}
-		else if (cur->type == UCL_OBJECT) {
+		else if (cur->type == UCL_OBJECT &&
+				g_ascii_strcasecmp (ucl_object_key (cur), "rmilter") != 0) {
 			/* Parse metric */
 			rspamc_metric_output (out, cur);
 		}
@@ -1129,12 +1131,8 @@ rspamc_mime_output (FILE *out, ucl_object_t *result, GString *input,
 		g_string_free (symbuf, TRUE);
 
 		if (ucl_object_lookup (result, "dkim-signature")) {
-			folded_symbuf = rspamd_header_value_fold ("DKIM-Signature",
-					ucl_object_tostring (ucl_object_lookup (result, "dkim-signature")),
-					0);
-			rspamd_printf_gstring (added_headers, "DKIM-Signature: %v\r\n",
-					folded_symbuf);
-			g_string_free (folded_symbuf, TRUE);
+			rspamd_printf_gstring (added_headers, "DKIM-Signature: %s\r\n",
+					ucl_object_tostring (ucl_object_lookup (result, "dkim-signature")));
 		}
 
 		if (json || raw || compact) {

@@ -103,6 +103,7 @@ enum rspamd_task_stage {
 #define RSPAMD_TASK_FLAG_HAS_SPAM_TOKENS (1 << 20)
 #define RSPAMD_TASK_FLAG_HAS_HAM_TOKENS (1 << 21)
 #define RSPAMD_TASK_FLAG_EMPTY (1 << 22)
+#define RSPAMD_TASK_FLAG_LOCAL_CLIENT (1 << 23)
 
 #define RSPAMD_TASK_IS_SKIPPED(task) (((task)->flags & RSPAMD_TASK_FLAG_SKIP))
 #define RSPAMD_TASK_IS_JSON(task) (((task)->flags & RSPAMD_TASK_FLAG_JSON))
@@ -188,6 +189,7 @@ struct rspamd_task {
 	ucl_object_t *settings;							/**< Settings applied to task						*/
 
 	const gchar *classifier;						/**< Classifier to learn (if needed)				*/
+	guchar digest[16];
 };
 
 /**
@@ -275,6 +277,33 @@ gboolean rspamd_learn_task_spam (struct rspamd_task *task,
 struct metric_result;
 gdouble rspamd_task_get_required_score (struct rspamd_task *task,
 		struct metric_result *m);
+
+/**
+ * Returns the first header as value for a header
+ * @param task
+ * @param name
+ * @return
+ */
+rspamd_ftok_t * rspamd_task_get_request_header (struct rspamd_task *task,
+		const gchar *name);
+
+/**
+ * Returns all headers with the specific name
+ * @param task
+ * @param name
+ * @return
+ */
+GPtrArray* rspamd_task_get_request_header_multiple (struct rspamd_task *task,
+		const gchar *name);
+
+/**
+ * Adds a new request header to task (name and value should be mapped to fstring)
+ * @param task
+ * @param name
+ * @param value
+ */
+void rspamd_task_add_request_header (struct rspamd_task *task,
+		rspamd_ftok_t *name, rspamd_ftok_t *value);
 
 /**
  * Write log line about the specified task if needed

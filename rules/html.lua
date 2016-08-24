@@ -39,7 +39,7 @@ local function check_html_image(task, min, max)
               if parent then
                 if parent:get_type() == 'a' then
                   -- do not trigger on small and unknown size images
-                  if i['height'] + i['width'] >= 210 then
+                  if i['height'] + i['width'] >= 210 or not i['embedded'] then
                     return true
                   end
                 end
@@ -163,4 +163,70 @@ rspamd_config.R_SUSPICIOUS_IMAGES = {
   score = 5.0,
   group = 'html',
   description = 'Message contains many suspicious messages'
+}
+
+rspamd_config.R_WHITE_ON_WHITE = {
+  callback = function(task)
+    local tp = task:get_text_parts() -- get text parts in a message
+    local ret = false
+    local diff = 0.0
+    local normal_len = 0
+    local transp_len = 0
+    local arg
+
+    for _,p in ipairs(tp) do -- iterate over text parts array using `ipairs`
+      if p:is_html() and p:get_html() then -- if the current part is html part
+        normal_len = p:get_length()
+        local hc = p:get_html() -- we get HTML context
+
+        hc:foreach_tag('font', function(tag, len)
+          local bl = tag:get_extra()
+          if bl then
+            if bl['bgcolor'] and bl['color'] then
+              local color = bl['color']
+              local bgcolor = bl['bgcolor']
+              -- Should use visual approach here some day
+              local diff_r = math.abs(color[1] - bgcolor[1]) / 255.0
+              local diff_g = math.abs(color[2] - bgcolor[2]) / 255.0
+              local diff_b = math.abs(color[3] - bgcolor[3]) / 255.0
+              diff = (diff_r + diff_g + diff_b) / 3.0
+
+              if diff < 0.1 then
+                ret = true
+                transp_len = (transp_len + tag:get_content_length()) *
+                  (0.1 - diff) * 5.0
+                normal_len = normal_len - tag:get_content_length()
+                if not arg then
+                  arg = string.format('%s color #%x%x%x bgcolor #%x%x%x',
+                    tostring(tag:get_type()),
+                    color[1], color[2], color[3],
+                    bgcolor[1], bgcolor[2], bgcolor[3])
+                end
+              else
+
+              end
+            end
+          end
+
+          return false -- Continue search
+        end)
+
+      end
+    end
+
+    if ret then
+      if normal_len < 0 then normal_len = 0 end
+      local transp_rate = transp_len / (normal_len + transp_len)
+
+      if transp_rate > 0.1 then
+        return true,(transp_rate * 2.0),arg
+      end
+    end
+
+    return false
+  end,
+
+  score = 6.0,
+  group = 'html',
+  description = 'Message contains low contrast text'
 }

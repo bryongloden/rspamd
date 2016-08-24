@@ -40,8 +40,44 @@ rspamd_config.FWD_GOOGLE = {
         end
         return false
     end,
-    score = 0.1,
+    score = 0.0,
     description = "Message was forwarded by Google",
+    group = "forwarding"
+}
+
+rspamd_config.FWD_YANDEX = {
+    callback = function (task)
+        if not (task:has_from(1) and task:has_recipients(1)) then
+            return false
+        end
+        local hostname = task:get_hostname()
+        if hostname and hostname:lower():find('%.yandex%.[a-z]+$') then
+            if task:get_header_raw('X-Yandex-Forward') then
+                return true
+            end
+        end
+        return false
+    end,
+    score = 0.0,
+    description = "Message was forwarded by Yandex",
+    group = "forwarding"
+}
+
+rspamd_config.FWD_MAILRU = {
+    callback = function (task)
+        if not (task:has_from(1) and task:has_recipients(1)) then
+            return false
+        end
+        local hostname = task:get_hostname()
+        if hostname and hostname:lower():find('%.mail%.ru$') then
+            if task:get_header_raw('X-MailRu-Forward') then
+                return true
+            end
+        end
+        return false
+    end,
+    score = 0.0,
+    description = "Message was forwarded by Mail.ru",
     group = "forwarding"
 }
 
@@ -64,7 +100,7 @@ rspamd_config.FWD_SRS = {
         end
         return false
     end,
-    score = 0.1,
+    score = 0.0,
     description = "Message was forwarded using SRS",
     group = "forwarding"
 }
@@ -105,7 +141,7 @@ rspamd_config.FORWARDED = {
         end
         return false
     end,
-    score = 0.1,
+    score = 0.0,
     description = "Message was forwarded",
     group = "forwarding"
 }

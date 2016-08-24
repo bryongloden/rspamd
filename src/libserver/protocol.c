@@ -25,6 +25,7 @@
 #include "email_addr.h"
 #include "worker_private.h"
 #include "cryptobox.h"
+#include <math.h>
 
 /* Max line size */
 #define OUTBUFSIZ BUFSIZ
@@ -95,6 +96,7 @@
 #define DELIVER_TO_HEADER "Deliver-To"
 #define NO_LOG_HEADER "Log"
 #define MLEN_HEADER "Message-Length"
+#define USER_AGENT_HEADER "User-Agent"
 
 
 static GQuark
@@ -250,7 +252,7 @@ rspamd_protocol_handle_url (struct rspamd_task *task,
 			value = v;
 			/* Steal strings */
 			g_hash_table_iter_steal (&it);
-			g_hash_table_replace (task->request_headers, key, value);
+			rspamd_task_add_request_header (task, key, value);
 			msg_debug_task ("added header \"%T\" -> \"%T\" from HTTP query",
 					key, value);
 		}
@@ -279,199 +281,202 @@ rspamd_protocol_handle_headers (struct rspamd_task *task,
 	rspamd_fstring_t *hn, *hv;
 	rspamd_ftok_t *hn_tok, *hv_tok, srch;
 	gboolean fl, has_ip = FALSE;
-	struct rspamd_http_header *h, *htmp;
+	struct rspamd_http_header *header, *h, *htmp;
 	struct rspamd_email_address *addr;
 
-	HASH_ITER (hh, msg->headers, h, htmp) {
-		hn = rspamd_fstring_new_init (h->name->begin, h->name->len);
-		hv = rspamd_fstring_new_init (h->value->begin, h->value->len);
-		hn_tok = rspamd_ftok_map (hn);
-		hv_tok = rspamd_ftok_map (hv);
+	HASH_ITER (hh, msg->headers, header, htmp) {
+		DL_FOREACH (header, h) {
+			hn = rspamd_fstring_new_init (h->name->begin, h->name->len);
+			hv = rspamd_fstring_new_init (h->value->begin, h->value->len);
+			hn_tok = rspamd_ftok_map (hn);
+			hv_tok = rspamd_ftok_map (hv);
 
-		g_hash_table_replace (task->request_headers, hn_tok, hv_tok);
-
-		switch (*hn_tok->begin) {
-		case 'd':
-		case 'D':
-			IF_HEADER (DELIVER_TO_HEADER) {
-				task->deliver_to = rspamd_protocol_escape_braces (task, hv);
-				debug_task ("read deliver-to header, value: %s",
-					task->deliver_to);
-			}
-			else {
-				debug_task ("wrong header: %V", hn);
-			}
-			break;
-		case 'h':
-		case 'H':
-			IF_HEADER (HELO_HEADER) {
-				task->helo = rspamd_mempool_ftokdup (task->task_pool, hv_tok);
-				debug_task ("read helo header, value: %s", task->helo);
-			}
-			IF_HEADER (HOSTNAME_HEADER) {
-				task->hostname = rspamd_mempool_ftokdup (task->task_pool,
-						hv_tok);
-				debug_task ("read hostname header, value: %s", task->hostname);
-			}
-			break;
-		case 'f':
-		case 'F':
-			IF_HEADER (FROM_HEADER) {
-				task->from_envelope = rspamd_email_address_from_smtp (hv->str,
-						hv->len);
-				if (!task->from_envelope) {
-					msg_err_task ("bad from header: '%V'", hv);
-				}
-			}
-			else {
-				debug_task ("wrong header: %V", hn);
-			}
-			break;
-		case 'j':
-		case 'J':
-			IF_HEADER (JSON_HEADER) {
-				fl = rspamd_config_parse_flag (hv->str, hv->len);
-				if (fl) {
-					task->flags |= RSPAMD_TASK_FLAG_JSON;
+			switch (*hn_tok->begin) {
+			case 'd':
+			case 'D':
+				IF_HEADER (DELIVER_TO_HEADER) {
+					task->deliver_to = rspamd_protocol_escape_braces (task, hv);
+					debug_task ("read deliver-to header, value: %s",
+							task->deliver_to);
 				}
 				else {
-					task->flags &= ~RSPAMD_TASK_FLAG_JSON;
+					debug_task ("wrong header: %V", hn);
 				}
-			}
-			else {
-				debug_task ("wrong header: %V", hn);
-			}
-			break;
-		case 'q':
-		case 'Q':
-			IF_HEADER (QUEUE_ID_HEADER) {
-				task->queue_id = rspamd_mempool_ftokdup (task->task_pool,
-						hv_tok);
-				debug_task ("read queue_id header, value: %s", task->queue_id);
-			}
-			else {
-				debug_task ("wrong header: %V", hn);
-			}
-			break;
-		case 'r':
-		case 'R':
-			IF_HEADER (RCPT_HEADER) {
-				addr = rspamd_email_address_from_smtp (hv->str, hv->len);
-
-				if (addr) {
-					if (task->rcpt_envelope == NULL) {
-						task->rcpt_envelope = g_ptr_array_new ();
-					}
-
-					g_ptr_array_add (task->rcpt_envelope, addr);
+				break;
+			case 'h':
+			case 'H':
+				IF_HEADER (HELO_HEADER) {
+					task->helo = rspamd_mempool_ftokdup (task->task_pool, hv_tok);
+					debug_task ("read helo header, value: %s", task->helo);
 				}
-				else {
-					msg_err_task ("bad from header: '%T'", h->value);
-				}
-				debug_task ("read rcpt header, value: %V", hv);
-			}
-			else {
-				debug_task ("wrong header: %V", hn);
-			}
-			break;
-		case 'i':
-		case 'I':
-			IF_HEADER (IP_ADDR_HEADER) {
-				if (!rspamd_parse_inet_address (&task->from_addr, hv->str, hv->len)) {
-					msg_err_task ("bad ip header: '%V'", hv);
-					return FALSE;
-				}
-				debug_task ("read IP header, value: %V", hv);
-				has_ip = TRUE;
-			}
-			else {
-				debug_task ("wrong header: %V", hn);
-			}
-			break;
-		case 'p':
-		case 'P':
-			IF_HEADER (PASS_HEADER) {
-				srch.begin = "all";
-				srch.len = 3;
-
-				if (rspamd_ftok_casecmp (hv_tok, &srch) == 0) {
-					task->flags |= RSPAMD_TASK_FLAG_PASS_ALL;
-					debug_task ("pass all filters");
-				}
-			}
-			break;
-		case 's':
-		case 'S':
-			IF_HEADER (SUBJECT_HEADER) {
-				task->subject = rspamd_mempool_ftokdup (task->task_pool, hv_tok);
-			}
-			IF_HEADER (SETTINGS_ID_HEADER) {
-				guint64 h;
-				guint32 *hp;
-
-				h = rspamd_cryptobox_fast_hash_specific (RSPAMD_CRYPTOBOX_XXHASH64,
-						hv_tok->begin, hv_tok->len, 0xdeadbabe);
-				hp = rspamd_mempool_alloc (task->task_pool, sizeof (*hp));
-				memcpy (hp, &h, sizeof (*hp));
-				rspamd_mempool_set_variable (task->task_pool, "settings_hash",
-						hp, NULL);
-			}
-			break;
-		case 'u':
-		case 'U':
-			IF_HEADER (USER_HEADER) {
-				/*
-				 * We must ignore User header in case of spamc, as SA has
-				 * different meaning of this header
-				 */
-				if (!RSPAMD_TASK_IS_SPAMC (task)) {
-					task->user = rspamd_mempool_ftokdup (task->task_pool,
+				IF_HEADER (HOSTNAME_HEADER) {
+					task->hostname = rspamd_mempool_ftokdup (task->task_pool,
 							hv_tok);
+					debug_task ("read hostname header, value: %s", task->hostname);
 				}
-			}
-			IF_HEADER (URLS_HEADER) {
-				srch.begin = "extended";
-				srch.len = 8;
-
-				if (rspamd_ftok_casecmp (hv_tok, &srch) == 0) {
-					task->flags |= RSPAMD_TASK_FLAG_EXT_URLS;
-					debug_task ("extended urls information");
-				}
-			}
-			break;
-		case 'l':
-		case 'L':
-			IF_HEADER (NO_LOG_HEADER) {
-				srch.begin = "no";
-				srch.len = 2;
-
-				if (rspamd_ftok_casecmp (hv_tok, &srch) == 0) {
-					task->flags |= RSPAMD_TASK_FLAG_NO_LOG;
-				}
-			}
-			break;
-		case 'm':
-		case 'M':
-			IF_HEADER (MLEN_HEADER) {
-				if (!rspamd_strtoul (hv_tok->begin,
-						hv_tok->len,
-						&task->message_len)) {
-					msg_err_task ("Invalid message length header: %V", hv);
+				break;
+			case 'f':
+			case 'F':
+				IF_HEADER (FROM_HEADER) {
+					task->from_envelope = rspamd_email_address_from_smtp (hv->str,
+							hv->len);
+					if (!task->from_envelope) {
+						msg_err_task ("bad from header: '%V'", hv);
+					}
 				}
 				else {
-					task->flags |= RSPAMD_TASK_FLAG_HAS_CONTROL;
+					debug_task ("wrong header: %V", hn);
 				}
-			}
-			break;
-		default:
-			debug_task ("unknown header: %V", hn);
-			break;
-		}
-	}
+				break;
+			case 'j':
+			case 'J':
+				IF_HEADER (JSON_HEADER) {
+					fl = rspamd_config_parse_flag (hv->str, hv->len);
+					if (fl) {
+						task->flags |= RSPAMD_TASK_FLAG_JSON;
+					}
+					else {
+						task->flags &= ~RSPAMD_TASK_FLAG_JSON;
+					}
+				}
+				else {
+					debug_task ("wrong header: %V", hn);
+				}
+				break;
+			case 'q':
+			case 'Q':
+				IF_HEADER (QUEUE_ID_HEADER) {
+					task->queue_id = rspamd_mempool_ftokdup (task->task_pool,
+							hv_tok);
+					debug_task ("read queue_id header, value: %s", task->queue_id);
+				}
+				else {
+					debug_task ("wrong header: %V", hn);
+				}
+				break;
+			case 'r':
+			case 'R':
+				IF_HEADER (RCPT_HEADER) {
+					addr = rspamd_email_address_from_smtp (hv->str, hv->len);
 
-	if (task->hostname == NULL || task->hostname[0] == '\0') {
-		/* We assume that hostname is either "unknown" or existing */
-		task->hostname = rspamd_mempool_strdup (task->task_pool, "unknown");
+					if (addr) {
+						if (task->rcpt_envelope == NULL) {
+							task->rcpt_envelope = g_ptr_array_new ();
+						}
+
+						g_ptr_array_add (task->rcpt_envelope, addr);
+					}
+					else {
+						msg_err_task ("bad from header: '%T'", h->value);
+					}
+					debug_task ("read rcpt header, value: %V", hv);
+				}
+				else {
+					debug_task ("wrong header: %V", hn);
+				}
+				break;
+			case 'i':
+			case 'I':
+				IF_HEADER (IP_ADDR_HEADER) {
+					if (!rspamd_parse_inet_address (&task->from_addr, hv->str, hv->len)) {
+						msg_err_task ("bad ip header: '%V'", hv);
+						return FALSE;
+					}
+					debug_task ("read IP header, value: %V", hv);
+					has_ip = TRUE;
+				}
+				else {
+					debug_task ("wrong header: %V", hn);
+				}
+				break;
+			case 'p':
+			case 'P':
+				IF_HEADER (PASS_HEADER) {
+					srch.begin = "all";
+					srch.len = 3;
+
+					if (rspamd_ftok_casecmp (hv_tok, &srch) == 0) {
+						task->flags |= RSPAMD_TASK_FLAG_PASS_ALL;
+						debug_task ("pass all filters");
+					}
+				}
+				break;
+			case 's':
+			case 'S':
+				IF_HEADER (SUBJECT_HEADER) {
+					task->subject = rspamd_mempool_ftokdup (task->task_pool, hv_tok);
+				}
+				IF_HEADER (SETTINGS_ID_HEADER) {
+					guint64 h;
+					guint32 *hp;
+
+					h = rspamd_cryptobox_fast_hash_specific (RSPAMD_CRYPTOBOX_XXHASH64,
+							hv_tok->begin, hv_tok->len, 0xdeadbabe);
+					hp = rspamd_mempool_alloc (task->task_pool, sizeof (*hp));
+					memcpy (hp, &h, sizeof (*hp));
+					rspamd_mempool_set_variable (task->task_pool, "settings_hash",
+							hp, NULL);
+				}
+				break;
+			case 'u':
+			case 'U':
+				IF_HEADER (USER_HEADER) {
+					/*
+					 * We must ignore User header in case of spamc, as SA has
+					 * different meaning of this header
+					 */
+					if (!RSPAMD_TASK_IS_SPAMC (task)) {
+						task->user = rspamd_mempool_ftokdup (task->task_pool,
+								hv_tok);
+					}
+				}
+				IF_HEADER (URLS_HEADER) {
+					srch.begin = "extended";
+					srch.len = 8;
+
+					if (rspamd_ftok_casecmp (hv_tok, &srch) == 0) {
+						task->flags |= RSPAMD_TASK_FLAG_EXT_URLS;
+						debug_task ("extended urls information");
+					}
+				}
+				IF_HEADER (USER_AGENT_HEADER) {
+					if (hv_tok->len == 6 &&
+							rspamd_lc_cmp (hv_tok->begin, "rspamc", 6) == 0) {
+						task->flags |= RSPAMD_TASK_FLAG_LOCAL_CLIENT;
+					}
+				}
+				break;
+			case 'l':
+			case 'L':
+				IF_HEADER (NO_LOG_HEADER) {
+					srch.begin = "no";
+					srch.len = 2;
+
+					if (rspamd_ftok_casecmp (hv_tok, &srch) == 0) {
+						task->flags |= RSPAMD_TASK_FLAG_NO_LOG;
+					}
+				}
+				break;
+			case 'm':
+			case 'M':
+				IF_HEADER (MLEN_HEADER) {
+					if (!rspamd_strtoul (hv_tok->begin,
+							hv_tok->len,
+							&task->message_len)) {
+						msg_err_task ("Invalid message length header: %V", hv);
+					}
+					else {
+						task->flags |= RSPAMD_TASK_FLAG_HAS_CONTROL;
+					}
+				}
+				break;
+			default:
+				debug_task ("unknown header: %V", hn);
+				break;
+			}
+
+			rspamd_task_add_request_header (task, hn_tok, hv_tok);
+		}
 	}
 
 	if (!has_ip) {
@@ -672,6 +677,7 @@ urls_protocol_cb (gpointer key, gpointer value, gpointer ud)
 	struct rspamd_task *task = cb->task;
 	const gchar *user_field = "unknown";
 	gboolean has_user = FALSE;
+	guint len = 0;
 
 	if (!(task->flags & RSPAMD_TASK_FLAG_EXT_URLS)) {
 		obj = ucl_object_fromlstring (url->string, url->urllen);
@@ -685,16 +691,18 @@ urls_protocol_cb (gpointer key, gpointer value, gpointer ud)
 	if (cb->task->cfg->log_urls) {
 		if (task->user) {
 			user_field = task->user;
+			len = strlen (task->user);
 			has_user = TRUE;
 		}
 		else if (task->from_envelope) {
 			user_field = task->from_envelope->addr;
+			len = task->from_envelope->addr_len;
 		}
 
-		msg_info_task ("<%s> %s: %s; ip: %s; URL: %*s",
+		msg_info_task_encrypted ("<%s> %s: %*s; ip: %s; URL: %*s",
 			task->message_id,
 			has_user ? "user" : "from",
-			user_field,
+			len, user_field,
 			rspamd_inet_address_to_string (task->from_addr),
 			url->urllen, url->string);
 	}
@@ -859,8 +867,13 @@ rspamd_metric_result_ucl (struct rspamd_task *task,
 	ucl_object_insert_key (obj,
 			ucl_object_frombool (RSPAMD_TASK_IS_SKIPPED (task)),
 			"is_skipped", 0, false);
-	ucl_object_insert_key (obj, ucl_object_fromdouble (mres->score),
+	if (!isnan (mres->score)) {
+		ucl_object_insert_key (obj, ucl_object_fromdouble (mres->score),
 			"score", 0, false);
+	} else {
+		ucl_object_insert_key (obj,
+			ucl_object_fromdouble (0.0), "score", 0, false);
+	}
 	ucl_object_insert_key (obj,
 			ucl_object_fromdouble (rspamd_task_get_required_score (task, mres)),
 			"required_score", 0, false);
@@ -1021,8 +1034,13 @@ rspamd_protocol_write_ucl (struct rspamd_task *task)
 	dkim_sig = rspamd_mempool_get_variable (task->task_pool, "dkim-signature");
 
 	if (dkim_sig) {
-		ucl_object_insert_key (top, ucl_object_fromstring (dkim_sig->str),
-					"dkim-signature", 0, false);
+		GString *folded_header = rspamd_header_value_fold ("DKIM-Signature",
+				dkim_sig->str, 80);
+		ucl_object_insert_key (top,
+				ucl_object_fromstring_common (folded_header->str,
+						folded_header->len, UCL_STRING_RAW),
+				"dkim-signature", 0, false);
+		g_string_free (folded_header, TRUE);
 	}
 
 	rmilter_reply = rspamd_mempool_get_variable (task->task_pool, "rmilter-reply");

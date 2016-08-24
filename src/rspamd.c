@@ -280,7 +280,8 @@ reread_config (struct rspamd_main *rspamd_main)
 	/* Save some variables */
 	tmp_cfg->cfg_name = cfg_file;
 
-	if (!load_rspamd_config (rspamd_main, tmp_cfg, FALSE, RSPAMD_CONFIG_INIT_VALIDATE)) {
+	if (!load_rspamd_config (rspamd_main, tmp_cfg, TRUE,
+			RSPAMD_CONFIG_INIT_VALIDATE|RSPAMD_CONFIG_INIT_SYMCACHE)) {
 		rspamd_set_logger (rspamd_main->cfg, g_quark_try_string (
 				"main"), rspamd_main);
 		msg_err_main ("cannot parse new config file, revert to old one");
@@ -297,7 +298,6 @@ reread_config (struct rspamd_main *rspamd_main)
 			rspamd_main->cfg->log_level = G_LOG_LEVEL_DEBUG;
 		}
 
-		rspamd_init_filters (rspamd_main->cfg, TRUE);
 		msg_info_main ("config has been reread successfully");
 	}
 }
@@ -917,73 +917,74 @@ rspamd_cld_handler (gint signo, short what, gpointer arg)
 	/* Turn off locking for logger */
 	rspamd_log_nolock (rspamd_main->logger);
 
-	msg_debug_main ("catch SIGCHLD signal, finding terminated worker");
+	msg_debug_main ("catch SIGCHLD signal, finding terminated workers");
 	/* Remove dead child form children list */
-	wrk = waitpid (0, &res, 0);
-	if ((cur =
-				 g_hash_table_lookup (rspamd_main->workers,
-						 GSIZE_TO_POINTER (wrk))) != NULL) {
-		/* Unlink dead process from queue and hash table */
+	while ((wrk = waitpid (0, &res, WNOHANG)) > 0) {
+		if ((cur =
+				g_hash_table_lookup (rspamd_main->workers,
+						GSIZE_TO_POINTER (wrk))) != NULL) {
+			/* Unlink dead process from queue and hash table */
 
-		g_hash_table_remove (rspamd_main->workers, GSIZE_TO_POINTER (
-				wrk));
+			g_hash_table_remove (rspamd_main->workers, GSIZE_TO_POINTER (
+					wrk));
 
-		if (WIFEXITED (res) && WEXITSTATUS (res) == 0) {
-			/* Normal worker termination, do not fork one more */
-			msg_info_main ("%s process %P terminated normally",
-					g_quark_to_string (cur->type),
-					cur->pid);
-		}
-		else {
-			if (WIFSIGNALED (res)) {
-#ifdef WCOREDUMP
-				if (WCOREDUMP (res)) {
-					msg_warn_main (
-							"%s process %P terminated abnormally by signal: %d"
-							" and created core file",
-							g_quark_to_string (cur->type),
-							cur->pid,
-							WTERMSIG (res));
-				}
-				else {
-					msg_warn_main (
-							"%s process %P terminated abnormally by signal: %d"
-							" but NOT created core file",
-							g_quark_to_string (cur->type),
-							cur->pid,
-							WTERMSIG (res));
-				}
-#else
-				msg_warn_main (
-						"%s process %P terminated abnormally by signal: %d",
+			if (WIFEXITED (res) && WEXITSTATUS (res) == 0) {
+				/* Normal worker termination, do not fork one more */
+				msg_info_main ("%s process %P terminated normally",
 						g_quark_to_string (cur->type),
-						cur->pid,
-						WTERMSIG (res));
-#endif
+						cur->pid);
 			}
 			else {
-				msg_warn_main ("%s process %P terminated abnormally "
-						"with exit code %d",
-						g_quark_to_string (cur->type),
-						cur->pid,
-						WEXITSTATUS (res));
+				if (WIFSIGNALED (res)) {
+#ifdef WCOREDUMP
+					if (WCOREDUMP (res)) {
+						msg_warn_main (
+								"%s process %P terminated abnormally by signal: %d"
+								" and created core file",
+								g_quark_to_string (cur->type),
+								cur->pid,
+								WTERMSIG (res));
+					}
+					else {
+						msg_warn_main (
+								"%s process %P terminated abnormally by signal: %d"
+								" but NOT created core file",
+								g_quark_to_string (cur->type),
+								cur->pid,
+								WTERMSIG (res));
+					}
+#else
+					msg_warn_main (
+							"%s process %P terminated abnormally by signal: %d",
+							g_quark_to_string (cur->type),
+							cur->pid,
+							WTERMSIG (res));
+#endif
+				}
+				else {
+					msg_warn_main ("%s process %P terminated abnormally "
+							"with exit code %d",
+							g_quark_to_string (cur->type),
+							cur->pid,
+							WEXITSTATUS (res));
+				}
+				/* Fork another worker in replace of dead one */
+				rspamd_check_core_limits (rspamd_main);
+				rspamd_fork_delayed (cur->cf, cur->index, rspamd_main);
 			}
-			/* Fork another worker in replace of dead one */
-			rspamd_check_core_limits (rspamd_main);
-			rspamd_fork_delayed (cur->cf, cur->index, rspamd_main);
-		}
 
-		event_del (&cur->srv_ev);
-		/* We also need to clean descriptors left */
-		close (cur->control_pipe[0]);
-		close (cur->srv_pipe[0]);
-		g_free (cur);
-	}
-	else {
-		for (i = 0; i < other_workers->len; i++) {
-			if (g_array_index (other_workers, pid_t, i) == wrk) {
-				g_array_remove_index_fast (other_workers, i);
-				msg_info_main ("related process %P terminated", wrk);
+			event_del (&cur->srv_ev);
+			/* We also need to clean descriptors left */
+			close (cur->control_pipe[0]);
+			close (cur->srv_pipe[0]);
+			g_free (cur);
+		}
+		else {
+			for (i = 0; i < other_workers->len; i++) {
+				if (g_array_index (other_workers, pid_t, i) == wrk) {
+					g_array_remove_index_fast (other_workers, i);
+					msg_info_main ("related process %P terminated", wrk);
+				}
 			}
 		}
 	}

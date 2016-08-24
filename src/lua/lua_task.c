@@ -480,7 +480,7 @@ LUA_FUNCTION_DEF (task, get_timeval);
  * @method task:get_metric_score(name)
  * Get the current score of metric `name`. Should be used in post-filters only.
  * @param {string} name name of a metric
- * @return {number} the current score of the metric
+ * @return {table} table containing the current score and required score of the metric
  */
 LUA_FUNCTION_DEF (task, get_metric_score);
 /***
@@ -544,8 +544,9 @@ LUA_FUNCTION_DEF (task, get_settings_id);
  * @param {any} obj any lua object that corresponds to the settings format
  * @example
 task:set_rmilter_reply({
-	add_headers = {{'X-Lua', 'test'}},
-	remove_headers = {'DKIM-Signature},
+	add_headers = {['X-Lua'] = 'test'},
+	-- 1 is the position of header to remove
+	remove_headers = {['DKIM-Signature'] = 1},
 })
  */
 LUA_FUNCTION_DEF (task, set_rmilter_reply);
@@ -654,6 +655,13 @@ LUA_FUNCTION_DEF (task, has_flag);
  */
 LUA_FUNCTION_DEF (task, get_flags);
 
+/***
+ * @method task:get_digest()
+ * Returns message's unique digest (32 hex symbols)
+ * @return {string} hex digest
+ */
+LUA_FUNCTION_DEF (task, get_digest);
+
 static const struct luaL_reg tasklib_f[] = {
 	{NULL, NULL}
 };
@@ -729,6 +737,7 @@ static const struct luaL_reg tasklib_m[] = {
 	LUA_INTERFACE_DEF (task, get_flags),
 	LUA_INTERFACE_DEF (task, has_flag),
 	LUA_INTERFACE_DEF (task, set_rmilter_reply),
+	LUA_INTERFACE_DEF (task, get_digest),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
@@ -1268,19 +1277,15 @@ lua_task_get_parts (lua_State * L)
 static gint
 lua_task_get_request_header (lua_State *L)
 {
-	rspamd_ftok_t *hdr, srch;
+	rspamd_ftok_t *hdr;
 	struct rspamd_task *task = lua_check_task (L, 1);
 	const gchar *s;
 	struct rspamd_lua_text *t;
-	gsize len;
 
-	s = luaL_checklstring (L, 2, &len);
+	s = luaL_checkstring (L, 2);
 
 	if (s && task) {
-		srch.begin = (gchar *)s;
-		srch.len = len;
-
-		hdr = g_hash_table_lookup (task->request_headers, &srch);
+		hdr = rspamd_task_get_request_header (task, s);
 
 		if (hdr) {
 			t = lua_newuserdata (L, sizeof (*t));
@@ -1309,7 +1314,7 @@ lua_task_set_request_header (lua_State *L)
 	const gchar *s, *v = NULL;
 	rspamd_fstring_t *buf;
 	struct rspamd_lua_text *t;
-	rspamd_ftok_t *hdr, srch, *new_name;
+	rspamd_ftok_t *hdr, *new_name;
 	gsize len, vlen;
 
 	s = luaL_checklstring (L, 2, &len);
@@ -1328,25 +1333,12 @@ lua_task_set_request_header (lua_State *L)
 		}
 
 		if (v != NULL) {
-			srch.begin = (gchar *)s;
-			srch.len = len;
-
-			hdr = g_hash_table_lookup (task->request_headers, &srch);
-
-			if (!hdr) {
-				new_name = &srch;
-			}
-			else {
-				/* Not found, need to allocate */
-				buf = rspamd_fstring_new_init (srch.begin, srch.len);
-				new_name = rspamd_ftok_map (buf);
-			}
-
 			buf = rspamd_fstring_new_init (v, vlen);
 			hdr = rspamd_ftok_map (buf);
+			buf = rspamd_fstring_new_init (s, len);
+			new_name = rspamd_ftok_map (buf);
 
-			/* This does not destroy key if it exists */
-			g_hash_table_insert (task->request_headers, new_name, hdr);
+			rspamd_task_add_request_header (task, new_name, hdr);
 		}
 
 	}
@@ -2770,6 +2762,33 @@ lua_task_get_flags (lua_State *L)
 }
 
 static gint
+lua_task_get_digest (lua_State *L)
+{
+	struct rspamd_task *task = lua_check_task (L, 1);
+	gchar hexbuf[33];
+	gint r;
+
+	if (task) {
+		r = rspamd_encode_hex_buf (task->digest, sizeof (task->digest),
+				hexbuf, sizeof (hexbuf) - 1);
+
+		if (r > 0) {
+			hexbuf[r] = '\0';
+			lua_pushstring (L, hexbuf);
+		}
+		else {
+			lua_pushnil (L);
+		}
+
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
 lua_task_learn (lua_State *L)
 {
 	struct rspamd_task *task = lua_check_task (L, 1);
@@ -3023,8 +3042,6 @@ lua_task_get_metric_score (lua_State *L)
 			lua_rawseti (L, -2, 1);
 			lua_pushnumber (L, rs);
 			lua_rawseti (L, -2, 2);
-			lua_pushnumber (L, rs);
-			lua_rawseti (L, -2, 3);
 		}
 		else {
 			lua_pushnil (L);

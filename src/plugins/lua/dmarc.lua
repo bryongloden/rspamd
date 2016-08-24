@@ -36,7 +36,7 @@ local symbols = {
 local redis_params = nil
 local dmarc_redis_key_prefix = "dmarc_"
 local dmarc_domain = nil
-local elts_re = rspamd_regexp.create_cached("\\\\{0,1};\\s+")
+local elts_re = rspamd_regexp.create_cached("\\s*\\\\{0,1};\\s*")
 local dmarc_reporting = false
 local dmarc_actions = {}
 
@@ -55,7 +55,12 @@ end
 local function dmarc_callback(task)
   local from = task:get_from(2)
   local dmarc_domain
+  local ip_addr = task:get_ip()
 
+  if task:get_user() or (ip_addr and ip_addr:is_local()) then
+    rspamd_logger.infox(task, "skip DMARC checks for local networks and authorized users");
+    return
+  end
   if from and from[1] and from[1]['domain'] and not from[2] then
     dmarc_domain = rspamd_util.get_tld(from[1]['domain'])
   else
@@ -119,7 +124,7 @@ local function dmarc_callback(task)
               if dkim_pol == 's' then
                 strict_dkim = true
               elseif dkim_pol ~= 'r' then
-                failed_policy = 'adkim tag has invalid value'
+                failed_policy = 'adkim tag has invalid value: ' .. dkim_pol
                 return
               end
             end
@@ -128,7 +133,7 @@ local function dmarc_callback(task)
               if spf_pol == 's' then
                 strict_spf = true
               elseif spf_pol ~= 'r' then
-                failed_policy = 'aspf tag has invalid value'
+                failed_policy = 'aspf tag has invalid value: ' .. spf_pol
                 return
               end
             end
@@ -140,7 +145,7 @@ local function dmarc_callback(task)
                 strict_policy = true
                 quarantine_policy = true
               elseif (policy ~= 'none') then
-                failed_policy = 'p tag has invalid value'
+                failed_policy = 'p tag has invalid value: ' .. policy
                 return
               end
             end
@@ -161,7 +166,7 @@ local function dmarc_callback(task)
                   quarantine_policy = false
                 end
               else
-                failed_policy = 'sp tag has invalid value'
+                failed_policy = 'sp tag has invalid value: ' .. subdomain_policy
                 return
               end
             end
@@ -193,6 +198,7 @@ local function dmarc_callback(task)
       end
     end
 
+    local res = 0.5
     if failed_policy then
       task:insert_result('DMARC_BAD_POLICY', res, lookup_domain .. ' : ' .. failed_policy)
       return
@@ -207,9 +213,8 @@ local function dmarc_callback(task)
         if rspamd_util.strequal_caseless(efrom[1]['domain'], from[1]['domain']) then
           spf_ok = true
         elseif not strict_spf then
-          if rspamd_util.strequal_caseless(
-              string.sub(efrom[1]['domain'], -string.len('.' .. lookup_domain)),
-              '.' .. lookup_domain) then
+          local spf_tld = rspamd_util.get_tld(efrom[1]['domain'])
+          if rspamd_util.strequal_caseless(spf_tld, dmarc_domain) then
             spf_ok = true
           end
         end
@@ -221,9 +226,8 @@ local function dmarc_callback(task)
         if rspamd_util.strequal_caseless(from[1]['domain'], dkim_domain) then
           dkim_ok = true
         elseif not strict_dkim then
-          if rspamd_util.strequal_caseless(
-              string.sub(dkim_domain, -string.len('.' .. lookup_domain)),
-              '.' .. lookup_domain) then
+          local dkim_tld = rspamd_util.get_tld(dkim_domain)
+          if rspamd_util.strequal_caseless(dkim_tld, dmarc_domain) then
             dkim_ok = true
           end
         end
@@ -231,7 +235,6 @@ local function dmarc_callback(task)
     end
 
     disposition = "none"
-    local res = 0.5
     if not (spf_ok or dkim_ok) then
       res = 1.0
       if quarantine_policy then

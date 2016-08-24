@@ -28,8 +28,6 @@ local whitelist = nil
 local asn_cc_whitelist = nil
 
 local options = {
-  asn_provider = 'origin.asn.cymru.com', -- provider for ASN data
-  asn6_provider = 'origin6.asn.cymru.com', -- provider for ASN data
   actions = { -- how each action is treated in scoring
     ['reject'] = 1.0,
     ['add header'] = 0.25,
@@ -51,42 +49,11 @@ local options = {
   lower_bound = 10, -- minimum number of messages to be scored
   metric = 'default',
   min_score = nil,
-  max_score = nil
+  max_score = nil,
+  score_divisor = nil
 }
 
 local asn_re = rspamd_regexp.create_cached("[\\|\\s]")
-
-local function asn_check(task)
-  local ip = task:get_from_ip()
-
-  local function asn_dns_cb(resolver, to_resolve, results, err, key)
-    if results and results[1] then
-      local parts = asn_re:split(results[1])
-      -- "15169 | 8.8.8.0/24 | US | arin |" for 8.8.8.8
-      if parts[1] then
-        task:get_mempool():set_variable("asn", parts[1])
-      end
-      if parts[2] then
-        task:get_mempool():set_variable("ipnet", parts[2])
-      end
-      if parts[3] then
-        task:get_mempool():set_variable("country", parts[3])
-      end
-    end
-  end
-
-  if ip and ip:is_valid() then
-    local asn_provider = 'asn_provider'
-    if ip:get_version() == 6 then
-      asn_provider = 'asn6_provider'
-    end
-    local req_name = rspamd_logger.slog("%1.%2",
-      table.concat(ip:inversed_str_octets(), '.'), options[asn_provider])
-
-    task:get_resolver():resolve_txt(task:get_session(), task:get_mempool(),
-        req_name, asn_dns_cb)
-  end
-end
 
 local function ip_score_hash_key(asn, country, ipnet, ip)
   -- We use the most common attribute as hashing key
@@ -115,6 +82,13 @@ local function ip_score_get_task_vars(task)
   end
 
   return asn, country, ipnet
+end
+
+local function normalize_score(sc, total, mult)
+  if total < options['lower_bound'] then
+    return 0
+  end
+  return mult * rspamd_util.tanh(2.718281 * sc / total)
 end
 
 -- Set score based on metric's action
@@ -164,7 +138,11 @@ local ip_score_set = function(task)
     score_mult = 0
   end
 
-  score = score_mult * rspamd_util.tanh (2.718 * score)
+  if options['score_divisor'] then
+    score = score_mult * rspamd_util.tanh (2.718281 * (score/options['score_divisor']))
+  else
+    score = score_mult * rspamd_util.tanh (2.718281 * score)
+  end
 
   local hkey = ip_score_hash_key(asn, country, ipnet, ip)
   local upstream,ret
@@ -187,6 +165,45 @@ local ip_score_set = function(task)
     'HMSET', -- command
     redis_args -- arguments
   )
+
+  -- Now insert final result
+  asn_score = normalize_score(asn_score, total_asn, options['scores']['asn'])
+  country_score = normalize_score(country_score, total_country,
+      options['scores']['country'])
+  ipnet_score = normalize_score(ipnet_score, total_ipnet,
+       options['scores']['ipnet'])
+  ip_score = normalize_score(ip_score, total_ip, options['scores']['ip'])
+
+  local total_score = 0.0
+  local description_t = {}
+
+  if ip_score ~= 0 then
+    total_score = total_score + ip_score
+    table.insert(description_t, 'ip: ' .. '(' .. math.floor(ip_score * 10) .. ')')
+  end
+  if ipnet_score ~= 0 then
+    total_score = total_score + ipnet_score
+    table.insert(description_t, 'ipnet: ' .. ipnet .. '(' .. math.floor(ipnet_score * 10) .. ')')
+  end
+  if asn_score ~= 0 then
+    total_score = total_score + asn_score
+    table.insert(description_t, 'asn: ' .. asn .. '(' .. math.floor(asn_score * 10) .. ')')
+  end
+  if country_score ~= 0 then
+    total_score = total_score + country_score
+    table.insert(description_t, 'country: ' .. country .. '(' .. math.floor(country_score * 10) .. ')')
+  end
+
+  if options['max_score'] and (total_score*10) > options['max_score'] then
+    total_score = options['max_score']/10
+  end
+  if options['min_score'] and (total_score*10) < options['min_score'] then
+    total_score = options['min_score']/10
+  end
+
+  if total_score ~= 0 then
+    task:insert_result(options['symbol'], total_score, table.concat(description_t, ', '))
+  end
 end
 
 -- Check score for ip in keystorage
@@ -200,15 +217,6 @@ local ip_score_check = function(task)
       local total = tonumber(parts[2])
 
       return rep, total
-    end
-
-    local function normalize_score(sc, total, mult)
-      if total < options['lower_bound'] then
-        return 0
-      end
-
-      -- -mult to mult
-      return mult * rspamd_util.tanh(2.718 * sc / total)
     end
 
     if err then
@@ -237,44 +245,6 @@ local ip_score_check = function(task)
         country_score,total_country,
         ipnet_score,total_ipnet,
         ip_score, total_ip)
-
-      asn_score = normalize_score(asn_score, total_asn, options['scores']['asn'])
-      country_score = normalize_score(country_score, total_country,
-        options['scores']['country'])
-      ipnet_score = normalize_score(ipnet_score, total_ipnet,
-        options['scores']['ipnet'])
-      ip_score = normalize_score(ip_score, total_ip, options['scores']['ip'])
-
-      local total_score = 0.0
-      local description_t = {}
-
-      if ip_score ~= 0 then
-        total_score = total_score + ip_score
-        table.insert(description_t, 'ip: ' .. '(' .. math.floor(ip_score * 1000) / 100 .. ')')
-      end
-      if ipnet_score ~= 0 then
-        total_score = total_score + ipnet_score
-        table.insert(description_t, 'ipnet: ' .. ipnet .. '(' .. math.floor(ipnet_score * 1000) / 100 .. ')')
-      end
-      if asn_score ~= 0 then
-        total_score = total_score + asn_score
-        table.insert(description_t, 'asn: ' .. asn .. '(' .. math.floor(asn_score * 1000) / 100 .. ')')
-      end
-      if country_score ~= 0 then
-        total_score = total_score + country_score
-        table.insert(description_t, 'country: ' .. country .. '(' .. math.floor(country_score * 1000) / 100 .. ')')
-      end
-
-      if options['max_score'] and (total_score*10) > options['max_score'] then
-        total_score = options['max_score']/10
-      end
-      if options['min_score'] and (total_score*10) < options['min_score'] then
-        total_score = options['min_score']/10
-      end
-
-      if total_score ~= 0 then
-        task:insert_result(options['symbol'], total_score, table.concat(description_t, ', '))
-      end
     end
   end
 
@@ -364,13 +334,6 @@ end
 configure_ip_score_module()
 if redis_params then
   -- Register ip_score module
-  if options['asn_provider'] then
-    rspamd_config:register_symbol({
-      name = 'ASN_CHECK',
-      type = 'prefilter',
-      callback = asn_check,
-    })
-  end
   rspamd_config:register_symbol({
     name = 'IPSCORE_SAVE',
     type = 'postfilter',

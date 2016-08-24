@@ -1,3 +1,4 @@
+import demjson
 import grp
 import os
 import os.path
@@ -17,6 +18,16 @@ try:
     from urllib.request import urlopen
 except:
     from urllib2 import urlopen
+try:
+    import http.client as httplib
+except:
+    import httplib
+
+def Check_JSON(j):
+    d = demjson.decode(j, strict=True)
+    assert len(d) > 0
+    assert 'error' not in d
+    return d
 
 def cleanup_temporary_directory(directory):
     shutil.rmtree(directory)
@@ -45,12 +56,26 @@ def get_rspamc():
     return dname + "/src/client/rspamc"
 def get_rspamadm():
     if os.environ.get('RSPAMADM'):
-        return environ['RSPAMADM']
+        return os.environ['RSPAMADM']
     dname = get_top_dir()
     return dname + "/src/rspamadm/rspamadm"
 
+def HTTP(method, host, port, path, data=None, headers={}):
+    c = httplib.HTTPConnection("%s:%s" % (host, port))
+    c.request(method, path, data, headers)
+    r = c.getresponse()
+    t = r.read()
+    s = r.status
+    c.close()
+    return [s, t]
+
 def make_temporary_directory():
     return tempfile.mkdtemp()
+
+def path_splitter(path):
+    dirname = os.path.dirname(path)
+    basename = os.path.basename(path)
+    return [dirname, basename]
 
 def read_log_from_position(filename, offset):
     offset = long(offset)
